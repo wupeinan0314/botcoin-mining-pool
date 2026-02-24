@@ -6,12 +6,22 @@ A smart contract enabling combined mining pools for BOTCOIN on Base. Users depos
 
 This contract was built in response to the [100M BOTCOIN bounty](https://x.com/MineBotcoin) for a combined mining pool implementation.
 
-- **Deployed Contract:** [`0x067b304029C9B8772A5ea477AbfBf30a0F5F2e06`](https://basescan.org/address/0x067b304029C9B8772A5ea477AbfBf30a0F5F2e06)
+- **Deployed Contract (v2):** [`0x8385f636a4b91FBcce1f08Ebd976E8A073C06335`](https://basescan.org/address/0x8385f636a4b91FBcce1f08Ebd976E8A073C06335)
 - **Chain:** Base (8453)
 - **Solidity:** 0.8.20
 - **Dependencies:** OpenZeppelin Contracts (ReentrancyGuard, Pausable, SafeERC20)
 
 ## How It Works
+
+### v2 Improvements (based on review feedback)
+
+- **uint64 epoch IDs** — `claimRewards(uint64[])` matches the mining contract's `claim(uint64[])` signature (selector `0x35442c43`)
+- **Epoch-locked deposits** — deposits activate at the start of the next epoch, preventing mid-epoch entry/exit gaming
+- **Epoch-locked withdrawals** — withdrawal requests are queued and available after the current epoch ends
+- **On-chain epoch sync** — reads `currentEpoch()` directly from the mining contract, no manual tracking needed
+- **Anyone can claim rewards** — `claimRewards()` is not restricted to operator; any depositor can trigger reward distribution
+- **Emergency withdraw** — users can always exit, even when paused, forfeiting current epoch rewards
+- **processEpoch()** — public function to process epoch transitions, activating pending deposits
 
 ### For Depositors
 

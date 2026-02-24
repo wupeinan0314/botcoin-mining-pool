@@ -4,52 +4,51 @@
 
 A fully functional mining pool smart contract deployed on Base, enabling multiple users to combine their BOTCOIN holdings to reach mining tiers collectively.
 
-## Contract
+## Contract (v2)
 
-- **Address:** `0x067b304029C9B8772A5ea477AbfBf30a0F5F2e06`
+- **Address:** `0x8385f636a4b91FBcce1f08Ebd976E8A073C06335`
 - **Chain:** Base (8453)
 - **Solidity:** 0.8.20
+
+## v2 Changes (based on review feedback)
+
+1. **uint64 epoch IDs** — `claimRewards(uint64[])` matches mining contract's `claim(uint64[])` (selector `0x35442c43`)
+2. **Epoch-locked deposits** — deposits activate next epoch, preventing mid-epoch gaming
+3. **Epoch-locked withdrawals** — queued, available after current epoch ends
+4. **On-chain epoch sync** — reads `currentEpoch()` from mining contract directly
+5. **Anyone can claim** — `claimRewards()` not restricted to operator
+6. **Emergency withdraw** — always available, even when paused
 
 ## Features
 
 ### EIP-1271 Signature Verification ✅
-- Pool contract implements `isValidSignature(bytes32, bytes)` 
+- Pool contract implements `isValidSignature(bytes32, bytes)`
 - Returns magic value `0x1626ba7e` when operator signature is valid
-- Successfully tested against coordinator auth flow (nonce → sign → verify → token)
+- Successfully tested against coordinator auth flow on Base mainnet
 
 ### Deposit & Withdraw
-- Users deposit BOTCOIN via `deposit(uint256 amount)`
-- Withdrawals via `withdraw(uint256 amount)`
-- Tracks depositors and balances for pro-rata distribution
+- Users deposit BOTCOIN via `deposit(uint256 amount)` — locked at next epoch
+- Request withdrawal via `requestWithdrawal(uint256 amount)` — available after epoch ends
+- `completeWithdrawal()` to collect after lock period
+- `emergencyWithdraw()` for immediate exit (forfeits current epoch)
 
-### Mining Operations (Operator Only)
-- `submitReceiptToMining(bytes calldata)` — forwards receipt to mining contract
-- `claimRewards(uint256[] epochIds)` — claims epoch rewards and auto-distributes
-
-### Reward Distribution
-- Automatic pro-rata distribution to depositors on claim
-- Configurable operator fee (default 5%, max 20%)
-- Users claim accumulated rewards via `claimUserRewards()`
+### Mining Operations
+- Operator: `submitReceiptToMining(bytes calldata)` — forwards receipt to mining contract
+- Anyone: `claimRewards(uint64[] epochIds)` — claims and auto-distributes pro-rata
 
 ### Security
 - ReentrancyGuard on all state-changing functions
-- Two-step operator transfer (transferOperator → acceptOperator)
-- Operator never touches user deposits
+- Pausable — operator can pause deposits/mining (withdrawals always work)
+- Two-step operator transfer
 - SafeERC20 for all token transfers
-
-### View Functions
-- `getTierLevel()` — returns current tier (0/1/2/3)
-- `getPoolBalance()` — total BOTCOIN in pool
-- `getDepositorCount()` — number of depositors
+- Custom errors for gas efficiency
+- O(1) depositor removal
+- Max fee cap at 20%
+- ecrecover zero-address check
 
 ## Auth Flow Tested
 
-1. POST /v1/auth/nonce with miner = pool contract address ✅
-2. Operator EOA signs message via personal_sign ✅
-3. POST /v1/auth/verify — coordinator falls back to EIP-1271 ✅
-4. Pool contract verifies operator signature via ecrecover ✅
-5. Bearer token issued for pool contract address ✅
-
-## Source Code
-
-Full Solidity source available upon request or can be verified on BaseScan.
+1. POST /v1/auth/nonce (miner = pool contract) ✅
+2. Operator EOA signs via personal_sign ✅
+3. POST /v1/auth/verify → EIP-1271 fallback ✅
+4. Bearer token issued for pool contract ✅
