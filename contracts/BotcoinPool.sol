@@ -162,6 +162,11 @@ contract BotcoinPool is ReentrancyGuard, Pausable {
         }
         if (v < 27) v += 27;
 
+        // Reject non-canonical s values (signature malleability protection)
+        if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) {
+            return EIP1271_INVALID;
+        }
+
         address recovered = ecrecover(hash, v, r, s);
         if (recovered != address(0) && recovered == operator) {
             return EIP1271_MAGIC;
@@ -226,12 +231,16 @@ contract BotcoinPool is ReentrancyGuard, Pausable {
             depositorList.push(msg.sender);
         }
 
-        // If user already has pending for same or earlier epoch, merge
-        if (info.pending > 0 && info.lockEpoch <= lockEpoch) {
-            info.pending += amount;
-        } else {
-            info.pending = amount;
+        // If user has existing pending from an earlier epoch that hasn't been
+        // processed yet, process it first (move to locked manually)
+        if (info.pending > 0 && info.lockEpoch <= epoch) {
+            info.locked += info.pending;
+            totalLocked += info.pending;
+            totalPending -= info.pending;
+            info.pending = 0;
         }
+
+        info.pending += amount;
         info.lockEpoch = lockEpoch;
         totalPending += amount;
 
@@ -277,6 +286,8 @@ contract BotcoinPool is ReentrancyGuard, Pausable {
      */
     function cancelPendingDeposit(uint256 amount) external nonReentrant {
         if (amount == 0) revert ZeroAmount();
+
+        processEpoch();
 
         DepositorInfo storage info = depositors[msg.sender];
         if (info.pending < amount) revert InsufficientDeposit();

@@ -6,7 +6,7 @@ A fully functional mining pool smart contract deployed on Base, enabling multipl
 
 ## Contract (v3)
 
-- **Address:** `0x8F6754cfC0CE4725F58EfEb8211d76EC9B43799d`
+- **Address:** `0x84681Be18121b29Cf2A5CF48BA73127f83A2DA31`
 - **Chain:** Base (8453)
 - **Solidity:** 0.8.20
 
