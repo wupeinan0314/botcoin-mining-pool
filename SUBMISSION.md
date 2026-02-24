@@ -4,9 +4,9 @@
 
 A fully functional mining pool smart contract deployed on Base, enabling multiple users to combine their BOTCOIN holdings to reach mining tiers collectively.
 
-## Contract (v2)
+## Contract (v3)
 
-- **Address:** `0x8385f636a4b91FBcce1f08Ebd976E8A073C06335`
+- **Address:** `0x8F6754cfC0CE4725F58EfEb8211d76EC9B43799d`
 - **Chain:** Base (8453)
 - **Solidity:** 0.8.20
 

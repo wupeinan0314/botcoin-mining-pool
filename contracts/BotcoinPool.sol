@@ -52,25 +52,18 @@ contract BotcoinPool is ReentrancyGuard, Pausable {
     address public pendingOperator;
     uint256 public operatorFeeBps;
 
-    // Depositor tracking
+    // Depositor tracking — separate locked vs pending amounts
     struct DepositorInfo {
-        uint256 amount;
-        uint64  lockEpoch;      // epoch at which deposit becomes active & locked
+        uint256 locked;         // actively participating in mining
+        uint256 pending;        // waiting for next epoch to activate
+        uint64  lockEpoch;      // epoch at which pending becomes locked
         uint256 index;          // index in depositorList (for O(1) removal)
         bool    active;
     }
     mapping(address => DepositorInfo) public depositors;
     address[] public depositorList;
-    uint256 public totalDeposits;       // total locked deposits (active in mining)
+    uint256 public totalLocked;         // total locked deposits (active in mining)
     uint256 public totalPending;        // deposits waiting for next epoch
-
-    // Pending deposits (applied at epoch boundary)
-    struct PendingDeposit {
-        address user;
-        uint256 amount;
-        uint64  targetEpoch;    // becomes active at this epoch
-    }
-    PendingDeposit[] public pendingDeposits;
 
     // Pending withdrawals
     struct PendingWithdrawal {
@@ -118,7 +111,6 @@ contract BotcoinPool is ReentrancyGuard, Pausable {
     error MiningCallFailed();
     error ClaimFailed();
     error InvalidSignatureLength();
-    error WithdrawalNotReady();
     error NoPendingWithdrawal();
 
     // ============ Modifiers ============
@@ -154,7 +146,6 @@ contract BotcoinPool is ReentrancyGuard, Pausable {
      * @dev The coordinator calls this with:
      *      hash = ethers.hashMessage(nonceMessage)  (EIP-191 personal_sign digest)
      *      signature = operator's 65-byte ECDSA signature
-     *      We ecrecover and check against the stored operator address.
      */
     function isValidSignature(bytes32 hash, bytes memory signature)
         external view returns (bytes4)
@@ -188,28 +179,22 @@ contract BotcoinPool is ReentrancyGuard, Pausable {
     }
 
     /**
-     * @notice Process epoch transitions — activate pending deposits,
-     *         release pending withdrawals. Anyone can call this.
+     * @notice Process epoch transitions — move pending deposits to locked.
+     *         Anyone can call this.
      */
     function processEpoch() public {
         uint64 epoch = getCurrentEpoch();
         if (epoch <= lastProcessedEpoch) return;
 
-        // Activate pending deposits
-        uint256 i = 0;
-        while (i < pendingDeposits.length) {
-            PendingDeposit storage pd = pendingDeposits[i];
-            if (pd.targetEpoch <= epoch) {
-                // Activate this deposit
-                totalDeposits += pd.amount;
-                totalPending -= pd.amount;
-
-                // Swap and pop
-                pendingDeposits[i] = pendingDeposits[pendingDeposits.length - 1];
-                pendingDeposits.pop();
-                // Don't increment i — check swapped element
-            } else {
-                i++;
+        // Activate pending deposits for all depositors
+        uint256 len = depositorList.length;
+        for (uint256 i = 0; i < len; i++) {
+            DepositorInfo storage info = depositors[depositorList[i]];
+            if (info.pending > 0 && info.lockEpoch <= epoch) {
+                info.locked += info.pending;
+                totalLocked += info.pending;
+                totalPending -= info.pending;
+                info.pending = 0;
             }
         }
 
@@ -221,7 +206,7 @@ contract BotcoinPool is ReentrancyGuard, Pausable {
 
     /**
      * @notice Deposit BOTCOIN into the pool.
-     *         Deposit is locked starting next epoch.
+     *         Deposit is queued as pending; becomes locked at next epoch.
      * @param amount Amount of BOTCOIN to deposit (18 decimals).
      */
     function deposit(uint256 amount) external nonReentrant whenNotPaused {
@@ -240,45 +225,39 @@ contract BotcoinPool is ReentrancyGuard, Pausable {
             info.active = true;
             depositorList.push(msg.sender);
         }
-        info.amount += amount;
-        info.lockEpoch = lockEpoch;
 
-        // Queue as pending — becomes active next epoch
-        pendingDeposits.push(PendingDeposit({
-            user: msg.sender,
-            amount: amount,
-            targetEpoch: lockEpoch
-        }));
+        // If user already has pending for same or earlier epoch, merge
+        if (info.pending > 0 && info.lockEpoch <= lockEpoch) {
+            info.pending += amount;
+        } else {
+            info.pending = amount;
+        }
+        info.lockEpoch = lockEpoch;
         totalPending += amount;
 
         emit Deposited(msg.sender, amount, lockEpoch);
     }
 
     /**
-     * @notice Request withdrawal. Funds become available after current epoch ends.
-     *         This immediately removes the deposit from the active mining balance.
-     * @param amount Amount to withdraw.
+     * @notice Request withdrawal of locked funds.
+     *         Funds become available after current epoch ends.
+     * @param amount Amount to withdraw from locked balance.
      */
     function requestWithdrawal(uint256 amount) external nonReentrant {
         if (amount == 0) revert ZeroAmount();
-        DepositorInfo storage info = depositors[msg.sender];
-        if (info.amount < amount) revert InsufficientDeposit();
 
         processEpoch();
+
+        DepositorInfo storage info = depositors[msg.sender];
+        if (info.locked < amount) revert InsufficientDeposit();
 
         uint64 epoch = getCurrentEpoch();
         uint64 availableEpoch = epoch + 1;
 
-        info.amount -= amount;
-        
-        // Check if any of this was still pending (not yet locked)
-        uint256 pendingRemoved = _removePendingDeposit(msg.sender, amount);
-        uint256 lockedRemoved = amount - pendingRemoved;
-        
-        if (pendingRemoved > 0) totalPending -= pendingRemoved;
-        if (lockedRemoved > 0) totalDeposits -= lockedRemoved;
+        info.locked -= amount;
+        totalLocked -= amount;
 
-        if (info.amount == 0) {
+        if (info.locked == 0 && info.pending == 0) {
             _removeDepositor(msg.sender);
         }
 
@@ -290,6 +269,27 @@ contract BotcoinPool is ReentrancyGuard, Pausable {
         pendingWithdrawAmount[msg.sender] += amount;
 
         emit WithdrawalRequested(msg.sender, amount, availableEpoch);
+    }
+
+    /**
+     * @notice Cancel pending deposit (not yet locked). Immediate refund.
+     * @param amount Amount to cancel from pending balance.
+     */
+    function cancelPendingDeposit(uint256 amount) external nonReentrant {
+        if (amount == 0) revert ZeroAmount();
+
+        DepositorInfo storage info = depositors[msg.sender];
+        if (info.pending < amount) revert InsufficientDeposit();
+
+        info.pending -= amount;
+        totalPending -= amount;
+
+        if (info.locked == 0 && info.pending == 0) {
+            _removeDepositor(msg.sender);
+        }
+
+        botcoin.safeTransfer(msg.sender, amount);
+        emit WithdrawalCompleted(msg.sender, amount);
     }
 
     /**
@@ -319,28 +319,37 @@ contract BotcoinPool is ReentrancyGuard, Pausable {
     }
 
     /**
-     * @notice Emergency withdraw — skip epoch lock, but forfeit any
-     *         unclaimed rewards for this epoch. Always available even when paused.
+     * @notice Emergency withdraw everything — locked, pending, rewards.
+     *         Always available even when paused. Forfeits current epoch participation.
      */
     function emergencyWithdraw() external nonReentrant {
         DepositorInfo storage info = depositors[msg.sender];
-        uint256 depositAmt = info.amount;
-        uint256 pendingAmt = pendingWithdrawAmount[msg.sender];
+        uint256 lockedAmt = info.locked;
+        uint256 pendingAmt = info.pending;
+        uint256 withdrawAmt = pendingWithdrawAmount[msg.sender];
         uint256 rewardAmt = unclaimedRewards[msg.sender];
-        uint256 total = depositAmt + pendingAmt + rewardAmt;
+        uint256 total = lockedAmt + pendingAmt + withdrawAmt + rewardAmt;
         if (total == 0) revert ZeroAmount();
 
-        // Clear deposit
-        if (depositAmt > 0) {
-            uint256 pendingRemoved = _removePendingDeposit(msg.sender, depositAmt);
-            if (pendingRemoved > 0) totalPending -= pendingRemoved;
-            totalDeposits -= (depositAmt - pendingRemoved);
-            info.amount = 0;
+        // Clear locked
+        if (lockedAmt > 0) {
+            info.locked = 0;
+            totalLocked -= lockedAmt;
+        }
+
+        // Clear pending
+        if (pendingAmt > 0) {
+            info.pending = 0;
+            totalPending -= pendingAmt;
+        }
+
+        // Remove from depositor list
+        if (lockedAmt > 0 || pendingAmt > 0) {
             _removeDepositor(msg.sender);
         }
 
         // Clear pending withdrawals
-        if (pendingAmt > 0) {
+        if (withdrawAmt > 0) {
             _clearPendingWithdrawals(msg.sender);
         }
 
@@ -359,7 +368,6 @@ contract BotcoinPool is ReentrancyGuard, Pausable {
     /**
      * @notice Forward a signed receipt to the mining contract.
      * @dev The coordinator returns calldata that should be forwarded as-is.
-     *      msg.sender of the mining contract call will be this pool contract.
      */
     function submitReceiptToMining(bytes calldata data) external onlyOperator whenNotPaused {
         (bool success, ) = address(miningContract).call(data);
@@ -370,9 +378,8 @@ contract BotcoinPool is ReentrancyGuard, Pausable {
 
     /**
      * @notice Claim mining rewards for given epochs and distribute to depositors.
-     *         Uses uint64[] to match the mining contract's claim(uint64[]) signature.
-     *         Anyone can call this — rewards go to depositors, not the caller.
-     * @param epochIds Array of epoch IDs to claim.
+     *         Anyone can call — rewards go to depositors pro-rata, not the caller.
+     * @param epochIds Array of epoch IDs (uint64) to claim.
      */
     function claimRewards(uint64[] calldata epochIds) external nonReentrant {
         processEpoch();
@@ -398,6 +405,10 @@ contract BotcoinPool is ReentrancyGuard, Pausable {
 
     // ============ Reward Distribution ============
 
+    /**
+     * @dev Distribute rewards pro-rata based on LOCKED deposits only.
+     *      Pending deposits do not earn rewards.
+     */
     function _distributeRewards(uint256 totalReward) internal returns (uint256 opFee) {
         opFee = (totalReward * operatorFeeBps) / 10000;
         uint256 depositorReward = totalReward - opFee;
@@ -409,14 +420,14 @@ contract BotcoinPool is ReentrancyGuard, Pausable {
             botcoin.safeTransfer(operator, opFee);
         }
 
-        // Distribute pro-rata to active depositors
-        if (totalDeposits > 0 && depositorReward > 0) {
+        // Distribute pro-rata to LOCKED depositors only
+        if (totalLocked > 0 && depositorReward > 0) {
             uint256 len = depositorList.length;
             for (uint256 i = 0; i < len; i++) {
                 address user = depositorList[i];
-                uint256 userDeposit = depositors[user].amount;
-                if (userDeposit > 0) {
-                    uint256 userReward = (depositorReward * userDeposit) / totalDeposits;
+                uint256 userLocked = depositors[user].locked;
+                if (userLocked > 0) {
+                    uint256 userReward = (depositorReward * userLocked) / totalLocked;
                     unclaimedRewards[user] += userReward;
                     totalUnclaimedRewards += userReward;
                 }
@@ -427,7 +438,7 @@ contract BotcoinPool is ReentrancyGuard, Pausable {
     }
 
     /**
-     * @notice Claim accumulated rewards as a depositor. Anyone can call.
+     * @notice Claim accumulated rewards. Anyone can call for themselves.
      */
     function claimUserRewards() external nonReentrant {
         uint256 amount = unclaimedRewards[msg.sender];
@@ -484,29 +495,6 @@ contract BotcoinPool is ReentrancyGuard, Pausable {
         info.index = 0;
     }
 
-    function _removePendingDeposit(address user, uint256 amount) internal returns (uint256 removed) {
-        uint256 remaining = amount;
-        uint256 i = 0;
-        while (i < pendingDeposits.length && remaining > 0) {
-            PendingDeposit storage pd = pendingDeposits[i];
-            if (pd.user == user) {
-                if (pd.amount <= remaining) {
-                    remaining -= pd.amount;
-                    removed += pd.amount;
-                    pendingDeposits[i] = pendingDeposits[pendingDeposits.length - 1];
-                    pendingDeposits.pop();
-                } else {
-                    pd.amount -= remaining;
-                    removed += remaining;
-                    remaining = 0;
-                    i++;
-                }
-            } else {
-                i++;
-            }
-        }
-    }
-
     function _clearPendingWithdrawals(address user) internal {
         uint256 i = 0;
         while (i < pendingWithdrawals.length) {
@@ -539,18 +527,19 @@ contract BotcoinPool is ReentrancyGuard, Pausable {
     }
 
     function getDepositorInfo(address user) external view returns (
-        uint256 depositAmount,
+        uint256 lockedAmount,
+        uint256 pendingAmount,
         uint64  lockEpoch,
         uint256 pendingRewards,
         uint256 pendingWithdraw,
         bool    active
     ) {
         DepositorInfo storage info = depositors[user];
-        return (info.amount, info.lockEpoch, unclaimedRewards[user], pendingWithdrawAmount[user], info.active);
+        return (info.locked, info.pending, info.lockEpoch, unclaimedRewards[user], pendingWithdrawAmount[user], info.active);
     }
 
     function getPoolStats() external view returns (
-        uint256 _totalDeposits,
+        uint256 _totalLocked,
         uint256 _totalPending,
         uint256 _totalRewardsEarned,
         uint256 _totalReceipts,
@@ -562,7 +551,7 @@ contract BotcoinPool is ReentrancyGuard, Pausable {
         uint256 bal = botcoin.balanceOf(address(this));
         uint256 tier = bal >= TIER_3 ? 3 : bal >= TIER_2 ? 2 : bal >= TIER_1 ? 1 : 0;
         return (
-            totalDeposits,
+            totalLocked,
             totalPending,
             totalRewardsEarned,
             totalReceiptsSubmitted,
@@ -571,10 +560,6 @@ contract BotcoinPool is ReentrancyGuard, Pausable {
             getCurrentEpoch(),
             operatorFeeBps
         );
-    }
-
-    function getPendingDepositsCount() external view returns (uint256) {
-        return pendingDeposits.length;
     }
 
     function getPendingWithdrawalsCount() external view returns (uint256) {

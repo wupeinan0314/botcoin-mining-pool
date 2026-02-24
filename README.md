@@ -6,7 +6,7 @@ A smart contract enabling combined mining pools for BOTCOIN on Base. Users depos
 
 This contract was built in response to the [100M BOTCOIN bounty](https://x.com/MineBotcoin) for a combined mining pool implementation.
 
-- **Deployed Contract (v2):** [`0x8385f636a4b91FBcce1f08Ebd976E8A073C06335`](https://basescan.org/address/0x8385f636a4b91FBcce1f08Ebd976E8A073C06335)
+- **Deployed Contract (v3):** [`0x8F6754cfC0CE4725F58EfEb8211d76EC9B43799d`](https://basescan.org/address/0x8F6754cfC0CE4725F58EfEb8211d76EC9B43799d)
 - **Chain:** Base (8453)
 - **Solidity:** 0.8.20
 - **Dependencies:** OpenZeppelin Contracts (ReentrancyGuard, Pausable, SafeERC20)
